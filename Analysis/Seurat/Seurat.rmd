@@ -1,0 +1,446 @@
+---
+title: "Sponge_seurat_clean"
+output: html_document
+date: "2024-04-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(cowplot)
+library(DoubletFinder)
+library(harmony)
+```
+```{r}
+dataset_loc <- "/tank/projects/Zubarev_sponge/Analysis/2024_01_02_CellRanger/"
+ids <- c("bob_1", "bob_2")
+
+d10x.data <- sapply(ids, function(i){
+  d10x <- Read10X(file.path(dataset_loc,i,"/outs/filtered_feature_bc_matrix/"))
+  colnames(d10x) <- paste(sapply(strsplit(colnames(d10x),split="-"),'[[',1L),i,sep="-")
+  d10x
+})
+```
+
+Create two Seurat objects
+
+```{r}
+seurat_list<-sapply(d10x.data, function(i){CreateSeuratObject(i,
+  project = "H. dujardini cell atlas", 
+  min.cells = 10,
+  min.features = 200,
+  names.field = 2,
+  names.delim = "_")})
+```
+
+Calculate mito genes percentage
+
+```{r}
+mito.genes<-grep("^MT-", c(rownames(seurat_list$bob_1), colnames(seurat_list$bob_2)), value = T)
+mito<-sapply(seurat_list, function(i){i[mito.genes, ]})
+
+percent.mito.bob1 <- Matrix::colSums(mito$bob_1@assays$RNA) / Matrix::colSums(seurat_list$bob_1@assays$RNA)
+seurat_list$bob_1 <- AddMetaData(
+  object = seurat_list$bob_1,
+  metadata = percent.mito.bob1,
+  col.name= "percent.mito")
+
+percent.mito.bob2 <- Matrix::colSums(mito$bob_2@assays$RNA) / Matrix::colSums(seurat_list$bob_2@assays$RNA)
+seurat_list$bob_2 <- AddMetaData(
+  object = seurat_list$bob_2,
+  metadata = percent.mito.bob2,
+  col.name= "percent.mito")
+```
+
+```{r}
+VlnPlot(seurat_list$bob_1, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), ncol = 3)
+VlnPlot(seurat_list$bob_2, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), ncol = 3)
+```
+
+Filter out cells with high mito genes percentage
+
+```{r}
+seurat_list<-sapply(seurat_list, function(i){subset(i, subset = nFeature_RNA > 200 & percent.mito < 0.05)})
+```
+
+The same plots after the filtering
+
+```{r}
+VlnPlot(seurat_list$bob_1, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), ncol = 3)
+VlnPlot(seurat_list$bob_2, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), ncol = 3)
+```
+
+Pre-processing for DoubletFinder: normalization, variable genes selection, data scaling, PCA
+
+```{r}
+seurat_list<-sapply(seurat_list, function(i){
+i <- NormalizeData(i, normalization.method = "LogNormalize", scale.factor = 10000)
+i <- FindVariableFeatures(i, selection.method = "vst", nfeatures = 2000)
+all.genes<-rownames(i)
+i <- ScaleData(i, features = all.genes)
+i <- RunPCA(i, features = VariableFeatures(object = i))
+return(i)
+})
+```
+
+```{r}
+ElbowPlot(seurat_list$bob_1)
+ElbowPlot(seurat_list$bob_2)
+```
+
+Clusterize cells
+
+```{r}
+seurat_list<-sapply(seurat_list, function(i){
+i <- FindNeighbors(i, dims = 1:50)
+i <- FindClusters(i, resolution = 0.25)
+i <- RunUMAP(i, dims = 1:50)
+return(i)
+})
+```
+
+```{r}
+DimPlot(seurat_list$bob_1, reduction = "umap", label=TRUE, label.size=3)
+DimPlot(seurat_list$bob_2, reduction = "umap", label=TRUE, label.size=3)
+```
+
+
+```{r}
+## pK Identification (no ground-truth) ------------------------------------------------------------
+sweep.res.list_bob1 <- paramSweep(seurat_list$bob_1, PCs = 1:30, sct = FALSE)
+sweep.stats_bob1 <- summarizeSweep(sweep.res.list_bob1, GT = FALSE)
+bcmvn_bob1 <- find.pK(sweep.stats_bob1)
+```
+
+```{r}
+## Homotypic Doublet Proportion Estimate ------------------------------------------------------------
+homotypic.prop <- modelHomotypic(seurat_list$bob_1@meta.data$seurat_clusters)           ## ex: annotations <- seu_kidney@meta.data$ClusteringResults
+nExp_poi <- round(0.075*nrow(seurat_list$bob_1@meta.data))  ## Assuming 7.5% doublet formation rate - tailor for your dataset
+nExp_poi.adj_bob1 <- round(nExp_poi*(1-homotypic.prop))
+```
+
+```{r}
+bob1_doublet_cleaned <- doubletFinder(seurat_list$bob_1, PCs = 1:30, pN = 0.25, pK = 0.13, nExp = nExp_poi.adj_bob1, reuse.pANN = FALSE, sct=FALSE)
+```
+
+```{r}
+## pK Identification (no ground-truth) ------------------------------------------------------------
+sweep.res.list_bob2 <- paramSweep(seurat_list$bob_2, PCs = 1:30, sct = FALSE)
+sweep.stats_bob2 <- summarizeSweep(sweep.res.list_bob2, GT = FALSE)
+bcmvn_bob2 <- find.pK(sweep.stats_bob1)
+```
+
+```{r}
+## Homotypic Doublet Proportion Estimate ------------------------------------------------------------
+homotypic.prop <- modelHomotypic(seurat_list$bob_2@meta.data$seurat_clusters)           ## ex: annotations <- seu_kidney@meta.data$ClusteringResults
+nExp_poi <- round(0.075*nrow(seurat_list$bob_2@meta.data))  ## Assuming 7.5% doublet formation rate - tailor for your dataset
+nExp_poi.adj_bob2 <- round(nExp_poi*(1-homotypic.prop))
+```
+
+
+```{r}
+bob2_doublet_cleaned <- doubletFinder(seurat_list$bob_2, PCs = 1:30, pN = 0.25, pK = 0.13, nExp = nExp_poi.adj_bob2, reuse.pANN = FALSE, sct=FALSE)
+```
+
+Add "replicate" metadata column
+
+```{r}
+bob1_doublet_cleaned@meta.data$replicate <- "bob1"
+bob2_doublet_cleaned@meta.data$replicate <- "bob2"
+```
+
+```{r}
+bob1_doublet_cleaned<-subset(bob1_doublet_cleaned, subset = DF.classifications_0.25_0.13_644 == "Singlet")
+bob2_doublet_cleaned<-subset(bob2_doublet_cleaned, subset = DF.classifications_0.25_0.13_775 == "Singlet")
+```
+
+Concatenate objects
+
+```{r}
+experiment.aggregate<-merge(bob1_doublet_cleaned, bob2_doublet_cleaned, merge.dr=FALSE, project="Halisarca dujardinii cell atlas")
+```
+
+Basic preprocessing
+
+```{r}
+experiment.aggregate <- NormalizeData(experiment.aggregate, normalization.method = "LogNormalize", scale.factor = 10000)
+experiment.aggregate <- FindVariableFeatures(experiment.aggregate, selection.method = "vst", nfeatures = 2000)
+all.genes<-rownames(experiment.aggregate)
+experiment.aggregate <- ScaleData(experiment.aggregate, features = all.genes)
+experiment.aggregate <- RunPCA(experiment.aggregate, features = VariableFeatures(object = experiment.aggregate))
+```
+
+Apply Harmony integration algorithm
+
+```{r}
+experiment.aggregate<-RunHarmony(experiment.aggregate, group.by.vars="replicate", nclust = 50, max_iter = 10, reduction.use="pca")
+```
+
+Basic preprocessing on Harmony dimension reduction. Use high resolution to separate all small clusters.
+
+```{r}
+experiment.aggregate <- experiment.aggregate %>%
+    FindNeighbors(reduction = "harmony", dims=1:50) %>%
+    FindClusters(resolution = 0.85)
+#experiment.aggregate <- experiment.aggregate %>%
+#    RunUMAP(reduction = "harmony",  dims = 1:50)
+```
+
+```{r}
+DimPlot(experiment.aggregate, reduction = "umap", label=TRUE, label.size=2, split.by = "replicate")
+```
+Remove small cell populations without clear markers (can be proven with code to obtain and annotate markers below, but not included here).
+
+```{r}
+experiment.aggregate<-subset(experiment.aggregate, subset = (seurat_clusters!="19")&(seurat_clusters!="22")&(seurat_clusters!="29")&(seurat_clusters!="30")&(seurat_clusters!="33")&(seurat_clusters!="34"))
+```
+
+Not very clean, but it will be more clean with marker-based reclustering.
+
+```{r}
+DimPlot(experiment.aggregate, reduction = "umap", label=TRUE, label.size=2, split.by = "replicate")
+```
+
+With lower resolution
+
+```{r}
+experiment.aggregate <- experiment.aggregate %>%
+    FindNeighbors(reduction = "harmony", dims=1:50) %>%
+    FindClusters(resolution = 0.3)
+#experiment.aggregate <- experiment.aggregate %>%
+#    RunUMAP(reduction = "harmony",  dims = 1:50)
+```
+
+```{r}
+DimPlot(experiment.aggregate, reduction = "umap", label=TRUE, label.size=2, split.by = "replicate")
+```
+
+## Marker genes search and annotation
+
+```{r}
+markers_batchcorrected<-FindAllMarkers(experiment.aggregate, logfc.threshold = 0.1)
+```
+
+Filter and sort marker table
+
+```{r}
+markers_batchcorrected<-markers_batchcorrected[(markers_batchcorrected$avg_log2FC > 0.1) & (markers_batchcorrected$p_val_adj < 1e-50),]
+markers_batchcorrected<-markers_batchcorrected[order(markers_batchcorrected$avg_log2FC, decreasing = TRUE),]
+markers_batchcorrected<-markers_batchcorrected[order(markers_batchcorrected$cluster, decreasing = FALSE),]
+```
+
+Read annotations
+
+```{r}
+#Trinotate
+trinotate <- read_xlsx('/tank/projects/Zubarev_sponge/Analysis/2024_01_06_Seurat/Trinotate_annotation_report.xlsx')
+colnames(trinotate)[1] <- 'gene'
+#Remove some redundant transcripts/isoforms of genes, which names are written like "HD_13401-RA.1.656e5673"
+trinotate <- trinotate[!grepl("RA.", trinotate$transcript_id),]
+```
+
+```{r}
+#eggNOG-mapper
+emapper<-read_excel("/tank/projects/Zubarev_sponge/Analysis/2024_02_20_eggNOG_mapper/out.emapper.annotations_nocomments.xlsx")
+colnames(emapper)[1]<-"prot_id"
+```
+
+```{r}
+#manual annotation of some genes provided by Institute of Developmantal Biology RAS
+idb_ras<-read_excel("/tank/projects/Zubarev_sponge/Analysis/2024_01_06_Seurat/Sc_Marker clasters_IDB_RAS.xls")
+colnames(idb_ras)[3]<-"transcript_id"
+```
+
+Annotate markers by joining all annotations, gather all ID variants in the first columns
+
+```{r}
+markers_annotated <- markers_batchcorrected %>% left_join(trinotate, by='gene') %>% left_join(emapper, by="prot_id") %>% left_join(idb_ras, by="transcript_id")
+
+markers_annotated <- markers_annotated[,c(6:8,11,1:5,9,10,12:45)]
+```
+
+Filter out markers expressed at low fraction of cluster cells. Retain only markers expressed at 1/2 cluster cells or more.
+
+```{r}
+markers_annotated<-markers_annotated[markers_annotated$pct.1 > 0.2,]
+```
+
+If one gene is a marker for several clusters, retain the record with maximium logFC. As well, retain only the most useful columns.
+
+```{r}
+markers_summary<- markers_annotated %>% group_by(transcript_id, gene) %>% summarise(max_log2FC=max(avg_log2FC), cluster=cluster[which.max(avg_log2FC)], Blastp=sprot_Top_BLASTP_hit[which.max(avg_log2FC)], Emapper_PFAMs=PFAMs[which.max(avg_log2FC)], Name=name[which.max(avg_log2FC)])
+
+markers_summary<-arrange(markers_summary, cluster, desc(max_log2FC))
+```
+
+Retain top30
+
+```{r}
+markers_top100 <- markers_summary %>% group_by(cluster) %>% group_modify(~head(.x,n=100))
+ungroup(markers_top100)
+```
+
+```{r}
+markers_top30 %>% group_by(cluster) %>% summarise(maxFC=max(max_log2FC))
+```
+
+Draw pictures of marker expression - top30 per cluster. (One PDF will contain markers for one cluster, to avoid too heavy PDFs.) Time-consuming (~1 hour) since will draw hundreds of plots.
+
+```{r}
+for (j in c(0:19))
+{
+j<-as.character(j)
+print(paste0("Plotting cluster ", j))
+
+#subset one cluster from a table
+onecluster<-markers_top30[markers_top30$cluster==j,]
+
+filename<-paste0("/tank/projects/Zubarev_sponge/Analysis/2024_04_04_Seurat_Harmony/markers_0.7_31clust/Markers_expression_07_31c_cluster",j,".pdf")
+pdf(file=filename, onefile = TRUE)
+
+for (i in 1:dim(onecluster)[1])
+{
+
+if (!is.na(onecluster$transcript_id[i]))
+{
+#extract name from different sources of annotation. Names extracted in order IDB RAS > BLASTP.
+if (!is.na(onecluster$Name[i])) {fullname=str_trunc(onecluster$Name[i], 45, ellipsis = "...")} else if (onecluster$Blastp[i]==".") {fullname="Unknown"} else {fullname=strsplit(strsplit(onecluster$Blastp[i],"\\^")[[1]][6], "=")[[1]][2]}
+
+#make plot
+plot<-FeaturePlot(experiment.aggregate, features = onecluster$gene[i], label=TRUE, label.size=3)+theme(plot.title=element_text(size=12), axis.text=element_text(size=12), axis.title=element_text(size=12),plot.caption = element_text(size=12))+labs(title = paste0(onecluster$transcript_id[i]," | ", onecluster$gene[i]," | ",str_trunc(fullname, 45, ellipsis = "...")), caption = paste0("Marker of Cluster ",onecluster$cluster[i]," with log2FC = ",round(onecluster$max_log2FC[i], digits=5),"."))
+#ggsave(filename="/tank/projects/Zubarev_sponge/Analysis/2024_01_06_Seurat/Markers_expression_UMAPS_for_IDB.pdf", device = "pdf")
+print(plot)
+}
+}
+dev.off()
+}
+```
+
+```{r}
+saveRDS(markers_summary, '/tank/projects/Zubarev_sponge/Analysis/2024_03_28_Celltype_deconvolution/markers_top_v20240405.rds')
+```
+
+```{r}
+write.table(as.matrix(GetAssayData(object = experiment.aggregate, slot = "counts")), 
+            '/tank/projects/Zubarev_sponge/Analysis/2024_04_04_SCENIC/sponge_count_matrix.csv', 
+            sep = ',', row.names = T, col.names = T, quote = F)
+```
+
+```{r}
+#This is needed for scGate
+experiment.aggregate <- JoinLayers(experiment.aggregate)
+```
+
+## Marker-based reclustering
+
+```{r}
+library(scGate)
+```
+
+Best markers list was obtained by manual inspection of expression maps.
+Perform marker-based reclustering.
+
+```{r}
+Cluster0_model <- gating_model(name = "0&Transition cell", signature = c("nbis-gene-14338+", "nbis-gene-2643+", "nbis-gene-2878-", "nbis-gene-27678-"))
+#Note the correct dashes in the names!!! Long and short dashes are the different symbols...
+Cluster1_model<-gating_model(name = "Cluster_1", signature = c(" nbis-gene-3245+", "nbis-gene-7566+"))
+Cluster2_model<-gating_model(name = "Proliferating", signature = c("nbis-gene-4339+", "nbis-gene-12146+"))
+#11783 
+Cluster3_model<-gating_model(name = "Cluster_3", signature = c("nbis-gene-12457+", "nbis-gene-5418"))
+Cluster4_model<-gating_model(name = "Cluster_4", signature = c("nbis-gene-2548", " nbis-gene-3067", "nbis-gene-27301")) #very unique expression pattern, many clear markers
+Cluster5_model<-gating_model(name = "Cluster_5", signature = c("nbis-gene-9784", "nbis-gene-26036"))
+#26036, 24371
+Cluster6_model<-gating_model(name = "Cluster_6", signature = c("nbis-gene-4492", "nbis-gene-20686")) #not easy, it's better without 2nd marker
+Cluster7_model<-gating_model(name = "Cluster_7", signature = c("nbis-gene-10124", "nbis-gene-10142"))
+Cluster8_model<-gating_model(name = "Cluster_8", signature = c("nbis-gene-125", "nbis-gene-12389")) #not well separated from cluster 3, markers are common in some cases.
+Cluster9_model<-gating_model(name = "Cluster_9", signature = c("nbis-gene-5002", "nbis-gene-6478", "nbis-gene-2309"))
+Cluster10_model<-gating_model(name = "Cluster_10", signature = c("nbis-gene-9214", "nbis-gene-9213", "nbis-gene-9210")) #very well-separated
+Cluster11_model<-gating_model(name = "Cluster_11", signature = c("nbis-gene-5806", "nbis-gene-1749")) #
+Cluster12_model<-gating_model(name = "Cluster_12", signature = c("nbis-gene-1890", "nbis-gene-3273")) 
+#baseline level of marker expression exists. 1890, 3273
+Cluster13_model<-gating_model(name = "Cluster_13", signature = c("nbis-gene-12799", "nbis-gene-13877"))
+Cluster14_model<-gating_model(name = "Cluster_14", signature = c("nbis-gene-24995", " nbis-gene-7451")) #good
+#Cluster15_model<-gating_model(name = "Cluster_15", signature = c("")) #unclear
+Cluster16_model<-gating_model(name = "Cluster_16", signature = c("nbis-gene-20174", "nbis-gene-11670"))
+Cluster17_model<-gating_model(name = "Cluster_17", signature = c("nbis-gene-2826", "nbis-gene-2824")) #good
+Cluster18_model<-gating_model(name = "Cluster_18", signature = c("nbis-gene-8546", "nbis-gene-8580")) #good
+Cluster19_model<-gating_model(name = "Cluster_19", signature = c("nbis-gene-20493", "nbis-gene-4284")) #very good
+Cluster20_model<-gating_model(name = "Cluster_20", signature = c("nbis-gene-18675", "nbis-gene-6290")) #acceptable, drop candidate
+
+Cluster21_model<-gating_model(name = "Cluster_21", signature = c("nbis-gene-10143", "nbis-gene-10144"))
+Cluster22_model<-gating_model(name = "Cluster_22", signature = c("nbis-gene-3963"))
+#clusters 22-24 dropped.
+```
+
+```{r}
+model_list<-list("cluster0"=Cluster0_model, 
+                 "cluster1"=Cluster1_model, 
+                 "cluster2"=Cluster2_model, 
+                 "cluster3"=Cluster3_model, 
+                 "cluster4"=Cluster4_model,
+                 "cluster5"=Cluster5_model, 
+                 "cluster6"=Cluster6_model, 
+                 "cluster7"=Cluster7_model, 
+                 "cluster8"=Cluster8_model, 
+                 "cluster9"=Cluster9_model,
+                 "cluster10"=Cluster10_model, 
+                 "cluster11"=Cluster11_model,
+                 "cluster12"=Cluster12_model,
+                 "cluster13"=Cluster13_model, 
+                 "cluster14"=Cluster14_model, 
+                 "cluster16"=Cluster16_model, 
+                 "cluster17"=Cluster17_model, 
+                 "cluster18"=Cluster18_model, 
+                 "cluster19"=Cluster19_model,
+                 "cluster20"=Cluster20_model, 
+                 "cluster21"=Cluster21_model,
+                 "cluster22"=Cluster22_model)
+obj <- scGate(data = experiment.aggregate, model = model_list, verbose = T, reduction = "harmony", ncores=20)
+```
+
+```{r}
+obj@meta.data %>% count(scGate_multi)
+```
+
+```{r}
+#pdf(file="/tank/projects/Zubarev_sponge/Analysis/2024_03_06_scGate_and_manual_annotation/19clusters_model.pdf")
+DimPlot(obj, group.by = "scGate_multi", label=TRUE, repel=TRUE)
+#dev.off()
+```
+
+```{r}
+obj<-subset(obj, subset = scGate_multi != "Multi")
+```
+
+```{r}
+DimPlot(obj, group.by = "scGate_multi", label=TRUE, repel=TRUE)
+```
+
+```{r}
+FeaturePlot(obj, features=c("nbis-gene-25113", "nbis-gene-14106","nbis-gene-24502","nbis-gene-3672"))
+```
+
+```{r}
+obj <- DietSeurat(obj, counts = TRUE, 
+  data = TRUE, 
+  scale.data = FALSE, 
+  features = rownames(obj), 
+  assays = "RNA",
+  dimreducs = NULL,
+  graphs = NULL,
+  misc = TRUE)
+```
+
+Clusters 19 and 21 does not have a lot of good markers. Exclude them from deconvolution analysis
+
+```{r}
+obj<-subset(obj, subset = (scGate_multi!="cluster21")&(scGate_multi!="cluster22"))
+```
+
+```{r}
+saveRDS(obj, '/tank/projects/Zubarev_sponge/Analysis/2024_03_28_Celltype_deconvolution/HDuj_nodoublets_harmony_scGate_multi_removed_v20240404.rds')
+```
