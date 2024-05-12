@@ -1,0 +1,162 @@
+---
+title: "GO enrichment"
+author: "Vasiliy Zubarev"
+date: "2024-04-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(topGO)
+library(readxl)
+library(stringr)
+library(xlsx)
+```
+
+Load annotations for all genes
+
+```{r}
+trinotate<-read_xlsx('/tank/projects/Zubarev_sponge/Analysis/2024_04_27_GO_enrichment/Trinotate_annotation_report.xlsx')
+```
+
+Prepare annotations for topGO
+
+```{r}
+#it is the piece of code that convert GO info to proper format. The result was written to "/tank/projects/Zubarev_sponge/Analysis/2024_04_27_GO_enrichment/GO_BLASTP_mappings.tsv"
+GO_BLASTP<-trinotate[c("gene_id", "gene_ontology_BLASTP")]
+GO_BLASTP<-GO_BLASTP[GO_BLASTP$gene_ontology_BLASTP != ".",]
+GO_BLASTP$GO_terms<-GO_BLASTP$gene_ontology_BLASTP %>% str_replace_all( '\\^[^`]+`', ',') %>% str_replace_all( '\\^[A-Za-z_]+,', ',') %>% str_replace_all( '\\^[^`]+$', '') %>% str_replace_all('\\^[A-Za-z_]+$', '')
+```
+
+Read mapping file (actually, this file is written from the GO_BLASTP table generated in previous chunk)
+
+```{r}
+geneID2GO <- readMappings(file = '/tank/projects/Zubarev_sponge/Analysis/2024_04_27_GO_enrichment/GO_BLASTP_mappings.tsv')
+```
+
+Main function for GO enrichment. Set the parameters for GO categories filtering here.
+
+```{r}
+CreateEnrichedGOTable<-function(geneList, geneID2GO, go_category){
+  ## Build the GOdata object in topGO
+  my_go_data <- new("topGOdata",
+                    description = paste("GOtest", go_category, sep = "_"),
+                    ontology    = go_category,
+                    allGenes    = geneList,
+                    gene2GO     = geneID2GO,
+                    annot       = annFUN.gene2GO,
+                    nodeSize    = 5) # Modify to reduce/increase stringency.
+  # STEP THREE
+  ## Calculate ks test using 'weight01' algorithm:
+  result_weight_ks <- runTest(object    = my_go_data,
+                              algorithm = "weight01",
+                              statistic = "ks")
+  ## Calculate fisher exact test using 'weight01' algorithm:
+  result_weight_fisher <- runTest(object    = my_go_data,
+                                  algorithm = "weight01",
+                                  statistic = "fisher")
+  ## Combine results from statistical tests:
+  result_weight_output <- GenTable(object    = my_go_data,
+                                   weight_ks = result_weight_ks,
+                                   weight_fisher = result_weight_fisher,
+                                   orderBy   = "weight_ks",
+                                   topNodes  = length(score(result_weight_ks)))
+  ## Correct ks test for multiple testing:
+  result_weight_output$weight_ks <- as.numeric(result_weight_output$weight_ks)
+  result_weight_output$weight_fisher <- as.numeric(result_weight_output$weight_fisher)
+  result_weight_output$weight_ks_adjusted <- p.adjust(p = result_weight_output$weight_ks,
+                                                      method = c("fdr"))
+  result_weight_output$weight_fisher_adjusted <- p.adjust(p = result_weight_output$weight_fisher,
+                                                          method = c("fdr"))
+  
+  ###########################################################################
+  ############## IMPORTANT: SET SIGNIFICANCE THRESHOLDS #####################
+  ###########################################################################
+  result_weight_output_sig <- subset(x      = result_weight_output,
+                                     subset = (Significant > Expected) &
+                                       (weight_ks_adjusted < 0.1) & (Significant > 1))
+  ###########################################################################
+  
+  ## Update column names:
+  colnames(result_weight_output_sig)[6] <- gsub(" ", "_",
+                                                colnames(result_weight_output_sig)[6])
+  ## For significant terms, add an additional field called 'category' which
+  ## will be used for plotting of individual go category:
+  result_weight_output_sig$category <- go_category
+  ## Remove gaps between Terms, which can cause downstream problems:
+  result_weight_output_sig$Term <- gsub(" ", "_", result_weight_output_sig$Term)
+  return(result_weight_output_sig)
+}
+```
+
+For convenience, unite 3 calls of previous function (for Cell Compartment, Molecular Function and Biological Process) together
+
+```{r}
+CreateThreeOnthologies<-function(geneList, geneID2GO){
+  cc<-CreateEnrichedGOTable(geneList = geneList, geneID2GO = geneID2GO, go_category = "CC")
+  mf<-CreateEnrichedGOTable(geneList = geneList, geneID2GO = geneID2GO, go_category = "MF")
+  bp<-CreateEnrichedGOTable(geneList = geneList, geneID2GO = geneID2GO, go_category = "BP")
+  three_onthologies<-rbind(cc, mf, bp)
+  return(three_onthologies)
+}
+```
+
+Read table with marker genes
+
+```{r}
+markers<-read_xlsx('/tank/projects/Zubarev_sponge/Analysis/2024_04_27_GO_enrichment/markers_annotated_50dim_res025.xlsx')
+```
+Subset markers of one cluster, filter them and convert to proper format for topGO (factor with all gene names and 2 levels 0/1 depending on whether this gene is in the studied set or not). Set the parameters for marker gene filtering here.
+
+```{r}
+PrepareMarkerSubset<-function(all_genes, markers_table, cluster_number){
+  
+  ####### IMPORTANT: SET PARAMETERS TO FILTER MARKERS ########
+  marker_cluster<-subset(markers_table, subset=(cluster == as.character(cluster_number)) & 
+                           (avg_log2FC > 0.5) & (p_val < 1e-100) & (sprot_Top_BLASTP_hit != '.'))
+  ############################################################
+  
+  marker_names<-marker_cluster$gene
+  geneList <- factor(as.integer(all_genes %in% marker_names))
+  names(geneList) <- all_genes
+  return(geneList)
+}
+```
+
+Cycle that calls created functions for each cluster and makes the big table
+
+```{r}
+clusters<-c(0:21)
+GO_enrichment_all_clusters<-NULL
+for (i in clusters){
+  print(paste('###### CALCULATING CLUSTER ', i, ' ######'))
+  markers_one_cluster<-PrepareMarkerSubset(all_genes=GO_BLASTP$gene_id, markers_table = markers, cluster_number = i)
+  GO_one_cluster<-CreateThreeOnthologies(geneList=markers_one_cluster, geneID2GO=geneID2GO)
+  GO_one_cluster$Cluster<-i
+  GO_enrichment_all_clusters<-rbind(GO_enrichment_all_clusters, GO_one_cluster)
+  }
+```
+
+Save results
+
+```{r}
+write.xlsx(GO_enrichment_all_clusters, "/tank/projects/Zubarev_sponge/Analysis/2024_04_27_GO_enrichment/Enrichment_by_clusters.xlsx")
+```
+
+
+There's old code used to find enrichment in manually selected set of genes.
+
+```{r}
+cluster5<-read_xlsx("/tank/projects/Zubarev_sponge/Analysis/2024_04_27_GO_enrichment/Sorted_ptc1_cluster5.xlsx")
+```
+
+```{r}
+geneNames<-GO_BLASTP$gene_id
+myInterestingGenes <- cluster5$gene
+geneList <- factor(as.integer(geneNames %in% myInterestingGenes))
+names(geneList) <- geneNames
+str(geneList)
+```
