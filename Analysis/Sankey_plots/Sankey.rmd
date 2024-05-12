@@ -1,0 +1,108 @@
+---
+title: "Sankey plot construction"
+author: "Vasiliy Zubarev"
+date: "2024-04-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyr)
+library(ggalluvial)
+```
+
+## Read csv with SAMap mapping scores
+
+```{r}
+map_wide<-data.frame(t(read.csv('/tank/projects/Zubarev_sponge/Analysis/2024_04_04_Seurat_Harmony/mapping_table_small_hd_sl.csv', sep=',', header=TRUE, row.names=1)))
+map_wide$HDuj_cell_type<-rownames(map_wide)
+
+#write types more accurately (Metabolocytes instead of Metabaloyctes)
+colnames(map_wide)[2]<-"sl_Apopylar_cells"
+colnames(map_wide)[8]<-"sl_Excurrent_pinacocytes1"
+colnames(map_wide)[9]<-"sl_Excurrent_pinacocytes2"
+colnames(map_wide)[10]<-"sl_Incurrent_pinacocytes2"
+colnames(map_wide)[15]<-"sl_Metabolocytes1"
+colnames(map_wide)[16]<-"sl_Metabolocytes2"
+colnames(map_wide)[12]<-"sl_Mesocytes1"
+colnames(map_wide)[13]<-"sl_Mesocytes2"
+colnames(map_wide)[14]<-"sl_Mesocytes3"
+colnames(map_wide)[19]<-"sl_Neuroid_choanocytes"
+colnames(map_wide)[20]<-"sl_Neuroid_pinacocytes"
+colnames(map_wide)[23]<-"sl_Transition_cells"
+
+head(map_wide)
+```
+
+Halisarca cell types:
+
+```{r}
+rownames(map_wide)
+```
+
+Convert to long format
+
+```{r}
+map_long<-gather(map_wide, key="SLac_cell_type", value="SAMap_score", 1:23)
+head(map_long)
+```
+
+Plot Sankey diagram
+
+```{r}
+order_slac<-c("sl_Apopylar_cells", "sl_Archeocytes", "sl_Choanoblasts2", "sl_Choanocytes", "sl_Myopeptidocytes1", "sl_Myopeptidocytes2", "sl_Mesocytes2", "sl_Mesocytes3", "sl_Sclerocytes", "sl_Mesocytes1", "sl_Choanoblasts1", "sl_Excurrent_pinacocytes2", "sl_Lophocytes",  "sl_Neuroid_pinacocytes", "sl_Incurrent_pinacocytes2", "sl_Metabolocytes1", "sl_Metabolocytes2","sl_Excurrent_pinacocytes1", "sl_Basopinacocytes", "sl_Neuroid_choanocytes", "sl_Scleropharocytes", "sl_Amoeboid", "sl_Transition_cells")
+
+order_hduj<-c("hd_cluster0", "hd_cluster1", "hd_cluster2", "hd_cluster3", "hd_cluster4", "hd_cluster5", "hd_cluster6", "hd_cluster7", "hd_cluster8", "hd_cluster9", "hd_cluster10", "hd_cluster11", "hd_cluster12", "hd_cluster13", "hd_cluster14", "hd_cluster16", "hd_cluster17", "hd_cluster18", "hd_cluster19", "hd_cluster21", "hd_cluster22")
+
+#pdf("/tank/projects/Zubarev_sponge/Analysis/2024_03_18_Actin_article_pictures/Sankey_hd_sl_20230416_filter02.pdf", height=8, width=8)
+map_long_filtered<-map_long[map_long$SAMap_score > 0.2,]
+ggplot(data = map_long_filtered,
+       aes(axis1 = factor(HDuj_cell_type, levels=order_hduj, ordered=TRUE), axis2 = factor(SLac_cell_type, levels=order_slac, ordered=TRUE), y = SAMap_score)) +
+  geom_alluvium(aes(fill = HDuj_cell_type), color="red") +
+  geom_stratum() +
+  geom_text(stat = "stratum",
+            aes(label = after_stat(stratum))) +
+  scale_x_discrete(limits = c("HDuj_cell_type", "SLac_cell_type"),
+                   expand = c(0.15, 0.05)) +
+  theme_void()
+#dev.off()
+```
+
+## The same thing for Halisarca-Amphimedon mapping
+
+```{r}
+map_wide_aq<-data.frame(t(read.csv('/tank/projects/Zubarev_sponge/Analysis/2024_04_04_Seurat_Harmony/mapping_table_small_hd_aq.csv', sep=',', header=TRUE, row.names=1)))
+map_wide_aq$HDuj_cell_type<-rownames(map_wide_aq)
+head(map_wide_aq)
+```
+
+```{r}
+map_long_aq<-gather(map_wide_aq, key="AQue_cell_type", value="SAMap_score", 1:13)
+head(map_long_aq)
+```
+
+```{r}
+unique(map_long_aq$AQue_cell_type)
+```
+
+```{r}
+order_aque<-c("aq_Archaeo_1", "aq_Archaeo_2", "aq_Aspcinzin", "aq_Bactericidal",  "aq_Choanocytes_1", "aq_Choanocytes_2", "aq_Sperm", "aq_Unk_1","aq_Choano_to_pinaco","aq_Collagen", "aq_Pinaco_1", "aq_Pinaco_2",  "aq_Unk_2")
+
+order_hduj<-c("hd_cluster0", "hd_cluster1", "hd_cluster2", "hd_cluster3", "hd_cluster4", "hd_cluster5", "hd_cluster6", "hd_cluster7", "hd_cluster8", "hd_cluster9", "hd_cluster10", "hd_cluster11", "hd_cluster12", "hd_cluster13", "hd_cluster14", "hd_cluster16", "hd_cluster17", "hd_cluster18", "hd_cluster19", "hd_cluster21", "hd_cluster22")
+
+#pdf("/tank/projects/Zubarev_sponge/Analysis/2024_03_18_Actin_article_pictures/Sankey_hd_aq_20230416_filter02.pdf", height=8, width=8)
+map_long_aq_filtered<-map_long_aq[map_long_aq$SAMap_score > 0.2,]
+ggplot(data = map_long_aq_filtered,
+       aes(axis1 = factor(HDuj_cell_type, levels=order_hduj, ordered=TRUE), axis2 = factor(AQue_cell_type, levels=order_aque, ordered=TRUE), y = SAMap_score)) +
+  geom_alluvium(aes(fill = HDuj_cell_type), color="red") +
+  geom_stratum() +
+  geom_text(stat = "stratum",
+            aes(label = after_stat(stratum))) +
+  scale_x_discrete(limits = c("HDuj_cell_type", "SLac_cell_type"),
+                   expand = c(0.15, 0.05)) +
+  theme_void()
+#dev.off()
+```
