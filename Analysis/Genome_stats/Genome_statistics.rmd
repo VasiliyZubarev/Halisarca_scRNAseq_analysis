@@ -1,0 +1,68 @@
+---
+title: "Halisarca dujardinii genome annotation description"
+author: "Vasiliy Zubarev"
+date: "2024-04-15"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r lib}
+library(ggplot2)
+library(ggpubr)
+```
+
+```{r load}
+annot<-read.csv("/tank/projects/Zubarev_sponge/Analysis/2024_04_15_Genome_description/masurca_21chr_addintrons_addintergenic_for_genome_description.gff", sep="\t", header=FALSE, col.names = c("Sequence", "Evidence", "Feature", "Start", "End", "V1", "Strand", "V2", "Description"))
+```
+
+```{r head}
+head(annot)
+```
+
+```{r len}
+annot$Length<-annot$End-annot$Start+1
+```
+
+```{r extract}
+genes<-annot[annot$Feature=="gene",]
+introns<-annot[annot$Feature=="intron",]
+exons<-annot[annot$Feature=="exon",]
+intergenic<-annot[annot$Feature=="intergenic_region",]
+```
+
+```{r shorter}
+shorter<-annot[(annot$Length<7500) & ((annot$Feature=="intron")|(annot$Feature=="gene")|(annot$Feature=="exon")),]
+```
+
+## Feature length distributions
+
+```{r plot}
+ggdensity(shorter, x = "Length", fill = "Feature",
+         palette = c("#00AFBB", "#E7B800", "#FC4E07"))+geom_vline(xintercept=median(exons$Length), lty=2)+geom_vline(xintercept=median(introns$Length), lty=2)+geom_vline(xintercept=median(genes$Length), lty=2)
+ggsave("/tank/projects/Zubarev_sponge/Analysis/2024_04_15_Genome_description/lengths.pdf")
+```
+
+## Median length of various features
+
+```{r median}
+median(genes$Length)
+median(introns$Length)
+median(exons$Length)
+```
+ 
+## Total number of nucleotides occupied by genes
+ 
+```{r coding1}
+sum(genes$Length)/(sum(genes$Length)+sum(intergenic$Length))
+```
+
+And, if we consider only exons,
+
+```{r coding2}
+sum(exons$Length)/(sum(genes$Length)+sum(intergenic$Length))
+```
