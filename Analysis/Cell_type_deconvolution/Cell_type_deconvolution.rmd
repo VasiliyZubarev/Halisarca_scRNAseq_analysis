@@ -1,0 +1,78 @@
+---
+title: "Cell type deconvolution analysis"
+output: html_document
+date: "2024-04-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+    library(MuSiC)
+    library(SeuratObject)
+    library(Seurat)
+    library(sp)
+    library(SingleCellExperiment)
+    library(Biobase)
+    library(readxl)
+    library(reshape2)
+    library(dplyr)
+})
+```
+
+Read Seurat with source scRNA-seq data
+
+```{r}
+hd.sce = as.SingleCellExperiment(readRDS('/tank/projects/Zubarev_sponge/Analysis/2024_03_28_Celltype_deconvolution/HDuj_nodoublets_harmony_scGate_multi_removed_v20240404.rds'))
+```
+
+Read normalized bulk readcounts
+
+```{r}
+hd.bulk <- data.frame(readRDS('/tank/projects/Zubarev_sponge/Analysis/2024_03_28_Celltype_deconvolution/counts_hd_235r_4seasons_exons_v2.rds'))
+```
+
+Read table with top marker genes
+
+```{r}
+hd.markers <- data.frame(readRDS('/tank/projects/Zubarev_sponge/Analysis/2024_03_28_Celltype_deconvolution/markers_top_v20240405.rds'))
+```
+
+Fill in 'nbis-gene-___' IDs in bulk data instead of 'HD-___-RA'  
+
+```{r}
+annot<-data.frame(read_xlsx('/tank/projects/Zubarev_sponge/Analysis/2024_03_28_Celltype_deconvolution/Trinotate_annotation_report.xlsx'))
+```
+
+```{r}
+rownames(annot)<-annot$transcript_id
+mapping<-annot[rownames(hd.bulk),]
+hd.bulk$gene_id<-mapping$gene_id
+hd.bulk<-na.omit(hd.bulk)
+rownames(hd.bulk)<-hd.bulk$gene_id
+hd.bulk<-hd.bulk[,1:43]
+```
+
+```{r}
+hd.bulk.mtx<-as.matrix(hd.bulk)
+```
+
+```{r}
+Est.prop = music_prop(bulk.mtx = hd.bulk.mtx,
+                      sc.sce = hd.sce,
+                      clusters = 'scGate_multi',  # or 'ident' if it represents cell types
+                      samples = 'orig.ident',  # Replace with actual sample identifier column if available
+                      markers = hd.markers$gene,
+                      verbose = TRUE)
+```
+
+```{r}
+music_long<-melt(Est.prop$Est.prop.weighted)
+colnames(music_long)<-c("BulkSample", "SC_Cluster", "value")
+```
+
+```{r}
+write.table(music_long, file = "/tank/projects/Zubarev_sponge/Analysis/2024_03_28_Celltype_deconvolution/Deconv_3k_marker_based_v20240405.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+```
